@@ -12,6 +12,7 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 PLIST_TEMPLATE="$PROJECT_DIR/Packaging/Info.plist"
+ICON_FILE="$PROJECT_DIR/Packaging/ZipMate.icns"
 EXECUTABLE="$BUILD_DIR/ZipMate"
 RESOURCE_BUNDLE="$BUILD_DIR/SevenZipMacUI_SevenZipMacUI.bundle/Resources"
 DMG_PATH="$DIST_DIR/ZipMate.dmg"
@@ -32,6 +33,9 @@ fi
 cp "$EXECUTABLE" "$MACOS_DIR/ZipMate"
 chmod +x "$MACOS_DIR/ZipMate"
 cp "$PLIST_TEMPLATE" "$CONTENTS_DIR/Info.plist"
+if [[ -f "$ICON_FILE" ]]; then
+  cp "$ICON_FILE" "$RESOURCES_DIR/ZipMate.icns"
+fi
 
 if [[ -d "$RESOURCE_BUNDLE" ]]; then
   cp -R "$RESOURCE_BUNDLE"/. "$RESOURCES_DIR/"
