@@ -19,5 +19,23 @@ struct ZipMateApp: App {
                     viewModel.handleLaunchCommand(launchCommand)
                 }
         }
+        .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About ZipMate") {
+                    showAboutPanel()
+                }
+            }
+        }
+    }
+
+    private func showAboutPanel() {
+        let shortVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.1"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "2"
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "ZipMate",
+            .applicationVersion: "Version \(shortVersion) (\(build))",
+            .credits: NSAttributedString(string: "Minimal 7-Zip UI for macOS")
+        ])
+        NSApp.activate(ignoringOtherApps: true)
     }
 }

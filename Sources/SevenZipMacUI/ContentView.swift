@@ -1730,13 +1730,6 @@ struct ContentView: View {
             .background(Color.black.opacity(0.05))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-            Text(viewModel.tr(
-                "说明：像图中“Open in Windows”那种固定 Finder 右键位置，通常需要 Finder Sync 扩展，不是普通 app/服务能稳定插进去的；本轮先把默认打开关联和“用本软件打开压缩包”做好。",
-                "Note: a fixed Finder context-menu slot like “Open in Windows” usually requires a Finder Sync extension. A regular app/service cannot reliably appear there; this round focuses on default file association and opening archives with this app."
-            ))
-            .font(.caption)
-            .foregroundStyle(.secondary)
-
             HStack {
                 Spacer()
                 Button(viewModel.tr("暂不设置", "Not Now")) {
