@@ -55,6 +55,10 @@ Sources/SevenZipMacUI/Resources/7zz
 
 If enabled in UI, ZipMate will prioritize this built-in binary.
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=VisualFLT/ZipMate&type=Date)](https://star-history.com/#VisualFLT/ZipMate&Date)
+
 ## License Notes
 
 ZipMate is a UI/workflow layer around 7-Zip.
