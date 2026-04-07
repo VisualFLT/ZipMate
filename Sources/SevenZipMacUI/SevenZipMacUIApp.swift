@@ -29,8 +29,8 @@ struct ZipMateApp: App {
     }
 
     private func showAboutPanel() {
-        let shortVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.1"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "2"
+        let shortVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.2"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "3"
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "ZipMate",
             .applicationVersion: "Version \(shortVersion) (\(build))",

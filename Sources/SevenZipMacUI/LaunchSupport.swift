@@ -1,6 +1,38 @@
 import AppKit
 import Foundation
 
+@MainActor
+enum AppTerminationCoordinator {
+    private static var bypassPrompt = false
+
+    static func shouldBypassPrompt() -> Bool {
+        bypassPrompt
+    }
+
+    static func consumeBypassPrompt() {
+        bypassPrompt = false
+    }
+
+    static func confirmTerminationIfNeeded() -> Bool {
+        guard SevenZipRunner.hasActiveProcesses() else { return true }
+
+        let alert = NSAlert()
+        alert.messageText = "当前仍有任务在执行"
+        alert.informativeText = "压缩/解压任务尚未完成。确定要退出吗？退出后会终止后台的 7zz 进程。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "确定退出")
+        alert.addButton(withTitle: "继续运行")
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return false }
+
+        bypassPrompt = true
+        SevenZipRunner.terminateAllProcesses()
+        return true
+    }
+}
+
+
 extension Notification.Name {
     static let sevenZipOpenArchiveURLs = Notification.Name("ZipMate.openArchiveURLs")
     static let sevenZipQuickExtractURLs = Notification.Name("ZipMate.quickExtractURLs")
@@ -33,6 +65,18 @@ enum LaunchCommandParser {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if AppTerminationCoordinator.shouldBypassPrompt() {
+            AppTerminationCoordinator.consumeBypassPrompt()
+            return .terminateNow
+        }
+        return AppTerminationCoordinator.confirmTerminationIfNeeded() ? .terminateNow : .terminateCancel
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.servicesProvider = self
     }

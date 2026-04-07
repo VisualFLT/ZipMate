@@ -2,6 +2,34 @@ import AppKit
 import Foundation
 import SwiftUI
 
+private func stageItemForCompression(from source: URL, to target: URL, fileManager fm: FileManager) throws {
+    let attributes = try fm.attributesOfItem(atPath: source.path)
+    let itemType = attributes[.type] as? FileAttributeType
+
+    if itemType == .typeSymbolicLink {
+        let destination = try fm.destinationOfSymbolicLink(atPath: source.path)
+        try fm.createSymbolicLink(atPath: target.path, withDestinationPath: destination)
+        return
+    }
+
+    var isDir: ObjCBool = false
+    if fm.fileExists(atPath: source.path, isDirectory: &isDir), isDir.boolValue {
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        let children = try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil)
+        for child in children {
+            let childTarget = target.appendingPathComponent(child.lastPathComponent, isDirectory: true)
+            try stageItemForCompression(from: child, to: childTarget, fileManager: fm)
+        }
+        return
+    }
+
+    do {
+        try fm.linkItem(at: source, to: target)
+    } catch {
+        try fm.copyItem(at: source, to: target)
+    }
+}
+
 struct HoverTrackingArea: NSViewRepresentable {
     let onHoverChanged: (Bool) -> Void
     let onMouseMoved: (CGPoint) -> Void
@@ -87,6 +115,28 @@ enum CreateArchiveType: String, CaseIterable, Identifiable {
             return "ZIP"
         }
     }
+
+    var compressionArguments: [String] {
+        switch self {
+        case .sevenZip:
+            // Keep a reasonable ratio, but bias toward speed.
+            return ["-mx=3"]
+        case .zip:
+            // Keep ZIP reasonably fast, while restoring a useful compression ratio.
+            return ["-tzip", "-mm=Deflate", "-mx=3"]
+        }
+    }
+
+    static func fromArchivePath(_ path: String) -> CreateArchiveType? {
+        switch URL(fileURLWithPath: path).pathExtension.lowercased() {
+        case "7z":
+            return .sevenZip
+        case "zip":
+            return .zip
+        default:
+            return nil
+        }
+    }
 }
 
 enum ExtractConflictPolicy {
@@ -117,9 +167,21 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var totalFileCount: Int = 0
     @Published private(set) var totalFolderCount: Int = 0
     @Published var rememberedExtractConflictOverwrite: Bool? = nil
-    @Published var suggestedAssociationOptions: Set<ArchiveAssociationOption> = [.zip, .sevenZip]
+    @Published var suggestedAssociationOptions: Set<ArchiveAssociationOption> = [
+        .zip,
+        .sevenZip,
+        .rar,
+        .tar,
+        .gz,
+        .bz2,
+        .xz,
+        .tgz,
+        .tbz2,
+        .txz
+    ]
     private var folderEntryCache: [String: [ArchiveEntry]] = [:]
     private var processedLaunchCommand: LaunchCommand = .none
+    private static let progressRegex = try! NSRegularExpression(pattern: #"(\d{1,3})%"#)
 
     func tr(_ zhHans: String, _ enUS: String) -> String {
         language == .zhHans ? zhHans : enUS
@@ -433,14 +495,17 @@ final class AppViewModel: ObservableObject {
         Task {
             isRunning = true
             extractProgress = nil
-            status = tr("正在压缩拖入文件...", "Compressing dropped files...")
+            status = tr("正在准备拖入文件...", "Preparing dropped files...")
             DebugLogger.log("importByDrag() begin currentFolder=\(folder) count=\(dropped.count)")
 
             let result = await addDroppedItems(
                 executablePath: bin,
                 archivePath: archiveURL.path,
                 sourceURLs: dropped,
-                destinationFolder: folder
+                destinationFolder: folder,
+                onProgress: { progress in
+                    self.extractProgress = progress
+                }
             )
 
             switch result {
@@ -454,6 +519,7 @@ final class AppViewModel: ObservableObject {
             }
 
             isRunning = false
+            extractProgress = nil
         }
 
         return true
@@ -540,14 +606,17 @@ final class AppViewModel: ObservableObject {
 
         Task {
             isRunning = true
-            extractProgress = nil
+            extractProgress = 0
             status = tr("正在打包...", "Packing...")
             let result = await createArchiveFromSourcesTask(
                 executablePath: bin,
                 sourceURLs: sourceURLs,
                 outputDirectoryURL: outputDirectoryURL,
                 name: trimmedName,
-                type: type
+                type: type,
+                onProgress: { progress in
+                    self.extractProgress = progress
+                }
             )
 
             switch result {
@@ -561,6 +630,7 @@ final class AppViewModel: ObservableObject {
                 DebugLogger.log("createArchiveFromSources() failed error=\(error.localizedDescription)")
                 self.isRunning = false
             }
+            self.extractProgress = nil
         }
 
         return true
@@ -582,7 +652,7 @@ final class AppViewModel: ObservableObject {
 
         Task {
             isRunning = true
-            extractProgress = nil
+            extractProgress = 0
             status = archives.count == 1
                 ? tr("正在直接解压...", "Extracting directly...")
                 : tr("正在批量直接解压...", "Extracting archives directly...")
@@ -595,7 +665,10 @@ final class AppViewModel: ObservableObject {
                     archivePath: archive.path,
                     includePaths: [],
                     destination: destination,
-                    conflictPolicy: .askUser
+                    conflictPolicy: .askUser,
+                    onProgress: { progress in
+                        self.extractProgress = progress
+                    }
                 )
 
                 switch result {
@@ -605,6 +678,7 @@ final class AppViewModel: ObservableObject {
                     DebugLogger.log("quickExtractArchives() failed archive=\(archive.path) error=\(error.localizedDescription)")
                     status = tr("直接解压失败：\(archive.lastPathComponent)", "Direct extract failed: \(archive.lastPathComponent)")
                     isRunning = false
+                    extractProgress = nil
                     return
                 }
             }
@@ -620,6 +694,7 @@ final class AppViewModel: ObservableObject {
                 status = tr("直接解压完成。", "Direct extract completed.")
                 isRunning = false
             }
+            extractProgress = nil
         }
     }
 
@@ -655,7 +730,7 @@ final class AppViewModel: ObservableObject {
         Task {
             DebugLogger.log("runExtract() begin selectedCount=\(includePaths.count) destination=\(destination.path)")
             isRunning = true
-            extractProgress = nil
+            extractProgress = 0
             status = includePaths.isEmpty
                 ? tr("正在解压全部...", "Extracting all...")
                 : tr("正在解压选中项...", "Extracting selected...")
@@ -666,7 +741,10 @@ final class AppViewModel: ObservableObject {
                 archivePath: archiveURL.path,
                 includePaths: includePaths,
                 destination: destination,
-                conflictPolicy: .askUser
+                conflictPolicy: .askUser,
+                onProgress: { progress in
+                    self.extractProgress = progress
+                }
             )
             let exitCode: Int32
             switch result {
@@ -697,39 +775,65 @@ final class AppViewModel: ObservableObject {
         executablePath: String,
         archivePath: String,
         sourceURLs: [URL],
-        destinationFolder: String
+        destinationFolder: String,
+        onProgress: (@MainActor (Double) -> Void)? = nil
     ) async -> Result<Void, NSError> {
-        let fm = FileManager.default
-        let tempRoot = fm.temporaryDirectory.appendingPathComponent("SevenZipMacUI_add_\(UUID().uuidString)")
+        let stagingResult = await Task.detached(priority: .userInitiated) { () -> Result<(URL, [String]), NSError> in
+            let fm = FileManager.default
+            let tempRoot = fm.temporaryDirectory.appendingPathComponent("SevenZipMacUI_add_\(UUID().uuidString)")
 
-        do {
-            try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-            defer { try? fm.removeItem(at: tempRoot) }
+            do {
+                try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
 
-            let stagingRoot = destinationFolder.isEmpty
-                ? tempRoot
-                : tempRoot.appendingPathComponent(destinationFolder, isDirectory: true)
-            try fm.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+                let stagingRoot = destinationFolder.isEmpty
+                    ? tempRoot
+                    : tempRoot.appendingPathComponent(destinationFolder, isDirectory: true)
+                try fm.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
 
-            var relativePaths: [String] = []
-            for source in sourceURLs {
-                let target = stagingRoot.appendingPathComponent(source.lastPathComponent, isDirectory: true)
-                if fm.fileExists(atPath: target.path) {
-                    try fm.removeItem(at: target)
+                var relativePaths: [String] = []
+                for source in sourceURLs {
+                    let target = stagingRoot.appendingPathComponent(source.lastPathComponent, isDirectory: true)
+                    if fm.fileExists(atPath: target.path) {
+                        try fm.removeItem(at: target)
+                    }
+                    try stageItemForCompression(from: source, to: target, fileManager: fm)
+                    let relativePath = destinationFolder.isEmpty
+                        ? source.lastPathComponent
+                        : "\(destinationFolder)/\(source.lastPathComponent)"
+                    relativePaths.append(relativePath)
                 }
-                try fm.copyItem(at: source, to: target)
-                let relativePath = destinationFolder.isEmpty
-                    ? source.lastPathComponent
-                    : "\(destinationFolder)/\(source.lastPathComponent)"
-                relativePaths.append(relativePath)
+                return .success((tempRoot, relativePaths))
+            } catch let error as NSError {
+                try? fm.removeItem(at: tempRoot)
+                return .failure(error)
+            }
+        }.value
+
+        switch stagingResult {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let (tempRoot, relativePaths)):
+            defer {
+                try? FileManager.default.removeItem(at: tempRoot)
             }
 
-            let args = ["a", "-r", archivePath] + relativePaths
-            DebugLogger.log("addDroppedItems() calling runSilent cwd=\(tempRoot.path) args=\(args.joined(separator: " "))")
-            let exit = await SevenZipRunner.runSilent(
+            await MainActor.run {
+                onProgress?(0.01)
+                self.status = self.tr("正在压缩拖入文件...", "Compressing dropped files...")
+            }
+
+            let compressionArguments = CreateArchiveType.fromArchivePath(archivePath)?.compressionArguments ?? ["-mx=3"]
+            let args = ["a", "-r", "-snl", "-bb0", "-bso1", "-bsp1", "-bse0"] + compressionArguments + [archivePath] + relativePaths
+            DebugLogger.log("addDroppedItems() calling run cwd=\(tempRoot.path) args=\(args.joined(separator: " "))")
+            let exit = await SevenZipRunner.run(
                 executablePath: executablePath,
                 arguments: args,
-                currentDirectoryURL: tempRoot
+                currentDirectoryURL: tempRoot,
+                onOutput: { output in
+                    if let progress = Self.parseProgress(from: output) {
+                        onProgress?(progress)
+                    }
+                }
             )
             guard exit == 0 else {
                 return .failure(NSError(
@@ -739,8 +843,6 @@ final class AppViewModel: ObservableObject {
                 ))
             }
             return .success(())
-        } catch let error as NSError {
-            return .failure(error)
         }
     }
 
@@ -766,7 +868,7 @@ final class AppViewModel: ObservableObject {
 
             try fm.createDirectory(at: tempRoot.appendingPathComponent(placeholderName, isDirectory: true), withIntermediateDirectories: true)
 
-            let createArgs = ["a", archiveURL.path, placeholderName]
+            let createArgs = ["a"] + type.compressionArguments + [archiveURL.path, placeholderName]
             let createExit = await SevenZipRunner.runSilent(
                 executablePath: executablePath,
                 arguments: createArgs,
@@ -806,37 +908,41 @@ final class AppViewModel: ObservableObject {
         sourceURLs: [URL],
         outputDirectoryURL: URL,
         name: String,
-        type: CreateArchiveType
+        type: CreateArchiveType,
+        onProgress: (@MainActor (Double) -> Void)? = nil
     ) async -> Result<URL, NSError> {
-        let fm = FileManager.default
         let archiveName = name.hasSuffix(".\(type.fileExtension)") ? name : "\(name).\(type.fileExtension)"
         let archiveURL = outputDirectoryURL.appendingPathComponent(archiveName)
-        let tempRoot = fm.temporaryDirectory.appendingPathComponent("SevenZipMacUI_pack_\(UUID().uuidString)")
 
-        do {
-            if fm.fileExists(atPath: archiveURL.path) {
-                try fm.removeItem(at: archiveURL)
-            }
+        let directParents = Set(sourceURLs.map { $0.deletingLastPathComponent().standardizedFileURL.path })
+        if directParents.count == 1, let parentPath = directParents.first {
+            let parentURL = URL(fileURLWithPath: parentPath, isDirectory: true)
+            let relativePaths = sourceURLs.map(\.lastPathComponent)
 
-            try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-            defer { try? fm.removeItem(at: tempRoot) }
-
-            var relativePaths: [String] = []
-            for source in sourceURLs {
-                let target = tempRoot.appendingPathComponent(source.lastPathComponent, isDirectory: true)
-                if fm.fileExists(atPath: target.path) {
-                    try fm.removeItem(at: target)
+            do {
+                if FileManager.default.fileExists(atPath: archiveURL.path) {
+                    try FileManager.default.removeItem(at: archiveURL)
                 }
-                try fm.copyItem(at: source, to: target)
-                relativePaths.append(source.lastPathComponent)
+            } catch let error as NSError {
+                return .failure(error)
             }
 
-            let args = ["a", "-r", archiveURL.path] + relativePaths
-            DebugLogger.log("createArchiveFromSourcesTask() args=\(args.joined(separator: " "))")
-            let exit = await SevenZipRunner.runSilent(
+            await MainActor.run {
+                onProgress?(0.01)
+                self.status = self.tr("正在直接打包源文件...", "Packing source files directly...")
+            }
+
+            let args = ["a", "-r", "-snl", "-bb0", "-bso1", "-bsp1", "-bse0"] + type.compressionArguments + [archiveURL.path] + relativePaths
+            DebugLogger.log("createArchiveFromSourcesTask() direct mode cwd=\(parentURL.path) args=\(args.joined(separator: " "))")
+            let exit = await SevenZipRunner.run(
                 executablePath: executablePath,
                 arguments: args,
-                currentDirectoryURL: tempRoot
+                currentDirectoryURL: parentURL,
+                onOutput: { output in
+                    if let progress = Self.parseProgress(from: output) {
+                        onProgress?(progress)
+                    }
+                }
             )
             guard exit == 0 else {
                 return .failure(NSError(
@@ -846,8 +952,69 @@ final class AppViewModel: ObservableObject {
                 ))
             }
             return .success(archiveURL)
-        } catch let error as NSError {
+        }
+
+        let stagingResult = await Task.detached(priority: .userInitiated) { () -> Result<(URL, [String]), NSError> in
+            let fm = FileManager.default
+            let tempRoot = fm.temporaryDirectory.appendingPathComponent("SevenZipMacUI_pack_\(UUID().uuidString)")
+
+            do {
+                if fm.fileExists(atPath: archiveURL.path) {
+                    try fm.removeItem(at: archiveURL)
+                }
+
+                try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+
+                var relativePaths: [String] = []
+                for source in sourceURLs {
+                    let target = tempRoot.appendingPathComponent(source.lastPathComponent, isDirectory: true)
+                    if fm.fileExists(atPath: target.path) {
+                        try fm.removeItem(at: target)
+                    }
+                    try stageItemForCompression(from: source, to: target, fileManager: fm)
+                    relativePaths.append(source.lastPathComponent)
+                }
+
+                return .success((tempRoot, relativePaths))
+            } catch let error as NSError {
+                try? fm.removeItem(at: tempRoot)
+                return .failure(error)
+            }
+        }.value
+
+        switch stagingResult {
+        case .failure(let error):
             return .failure(error)
+        case .success(let (tempRoot, relativePaths)):
+            defer {
+                try? FileManager.default.removeItem(at: tempRoot)
+            }
+
+            await MainActor.run {
+                onProgress?(0.01)
+                self.status = self.tr("正在整理源文件后打包...", "Preparing source files for packing...")
+            }
+
+            let args = ["a", "-r", "-snl", "-bb0", "-bso1", "-bsp1", "-bse0"] + type.compressionArguments + [archiveURL.path] + relativePaths
+            DebugLogger.log("createArchiveFromSourcesTask() args=\(args.joined(separator: " "))")
+            let exit = await SevenZipRunner.run(
+                executablePath: executablePath,
+                arguments: args,
+                currentDirectoryURL: tempRoot,
+                onOutput: { output in
+                    if let progress = Self.parseProgress(from: output) {
+                        onProgress?(progress)
+                    }
+                }
+            )
+            guard exit == 0 else {
+                return .failure(NSError(
+                    domain: "SevenZipMacUI",
+                    code: Int(exit),
+                    userInfo: [NSLocalizedDescriptionKey: "7zz pack failed with exit \(exit)"]
+                ))
+            }
+            return .success(archiveURL)
         }
     }
 
@@ -856,7 +1023,8 @@ final class AppViewModel: ObservableObject {
         archivePath: String,
         includePaths: [String],
         destination: URL,
-        conflictPolicy: ExtractConflictPolicy
+        conflictPolicy: ExtractConflictPolicy,
+        onProgress: (@MainActor (Double) -> Void)? = nil
     ) async -> Result<Void, NSError> {
         let fm = FileManager.default
         let tempRoot = fm.temporaryDirectory.appendingPathComponent("SevenZipMacUI_extract_\(UUID().uuidString)")
@@ -865,11 +1033,16 @@ final class AppViewModel: ObservableObject {
             try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
             defer { try? fm.removeItem(at: tempRoot) }
 
-            var args = ["x", archivePath, "-bb0", "-bso0", "-bsp0", "-bse0", "-o\(tempRoot.path)", "-y"]
+            var args = ["x", archivePath, "-bb0", "-bso1", "-bsp1", "-bse0", "-o\(tempRoot.path)", "-y"]
             args.append(contentsOf: includePaths)
-            let exit = await SevenZipRunner.runSilent(
+            let exit = await SevenZipRunner.run(
                 executablePath: executablePath,
-                arguments: args
+                arguments: args,
+                onOutput: { output in
+                    if let progress = Self.parseProgress(from: output) {
+                        onProgress?(progress)
+                    }
+                }
             )
             guard exit == 0 else {
                 return .failure(NSError(
@@ -973,6 +1146,23 @@ final class AppViewModel: ObservableObject {
             rememberedExtractConflictOverwrite = shouldOverwrite
         }
         return shouldOverwrite
+    }
+
+    private static func parseProgress(from text: String) -> Double? {
+        let nsText = text as NSString
+        let matches = progressRegex.matches(
+            in: text,
+            options: [],
+            range: NSRange(location: 0, length: nsText.length)
+        )
+        guard let last = matches.last, last.numberOfRanges >= 2 else {
+            return nil
+        }
+        let numberText = nsText.substring(with: last.range(at: 1))
+        guard let value = Double(numberText) else {
+            return nil
+        }
+        return min(max(value / 100.0, 0.0), 1.0)
     }
 
     private func resolved7zzPath() -> String {
@@ -1168,6 +1358,49 @@ final class AppViewModel: ObservableObject {
 
 }
 
+
+
+struct WindowCloseInterceptor: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            context.coordinator.attach(to: view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            context.coordinator.attach(to: nsView.window)
+        }
+    }
+
+    final class Coordinator: NSObject, NSWindowDelegate {
+        weak var window: NSWindow?
+
+        @MainActor
+        func attach(to window: NSWindow?) {
+            guard let window, self.window !== window else { return }
+            self.window = window
+            window.delegate = self
+        }
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            if AppTerminationCoordinator.shouldBypassPrompt() {
+                return true
+            }
+            guard SevenZipRunner.hasActiveProcesses() else { return true }
+            guard AppTerminationCoordinator.confirmTerminationIfNeeded() else { return false }
+            NSApp.terminate(nil)
+            return false
+        }
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var hoverAllButton = false
@@ -1220,6 +1453,7 @@ struct ContentView: View {
             guard let urls = notification.object as? [URL], !urls.isEmpty else { return }
             viewModel.handleLaunchCommand(.quickExtract(urls))
         }
+        .background(WindowCloseInterceptor())
         .task {
             if FileAssociationManager.shouldShowFirstLaunchPrompt() {
                 showAssociationSheet = true
@@ -1517,14 +1751,23 @@ struct ContentView: View {
             .font(.caption)
             .foregroundStyle(.white.opacity(0.85))
 
-            if let progress = viewModel.extractProgress {
+            if viewModel.isRunning {
                 HStack(spacing: 10) {
-                    ProgressView(value: progress, total: 1.0)
-                        .progressViewStyle(.linear)
-                    Text("\(Int(progress * 100))%")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.95))
-                        .frame(width: 42, alignment: .trailing)
+                    if let progress = viewModel.extractProgress {
+                        ProgressView(value: progress, total: 1.0)
+                            .progressViewStyle(.linear)
+                        Text("\(Int(progress * 100))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.95))
+                            .frame(width: 42, alignment: .trailing)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                        Text(viewModel.tr("准备中", "Preparing"))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.95))
+                            .frame(width: 56, alignment: .trailing)
+                    }
                 }
             }
         }

@@ -1,5 +1,47 @@
 import Foundation
 
+private final class SevenZipProcessRegistry: @unchecked Sendable {
+    static let shared = SevenZipProcessRegistry()
+
+    private let lock = NSLock()
+    private var processes: [Int32: Process] = [:]
+
+    func register(_ process: Process) {
+        lock.lock()
+        processes[process.processIdentifier] = process
+        lock.unlock()
+    }
+
+    func unregister(_ process: Process) {
+        lock.lock()
+        processes.removeValue(forKey: process.processIdentifier)
+        lock.unlock()
+    }
+
+    func hasActiveProcesses() -> Bool {
+        lock.lock()
+        let hasActive = processes.values.contains { $0.isRunning }
+        lock.unlock()
+        return hasActive
+    }
+
+    func terminateAll() {
+        lock.lock()
+        let running = Array(processes.values)
+        lock.unlock()
+
+        for process in running where process.isRunning {
+            process.terminate()
+        }
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
+            for process in running where process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+        }
+    }
+}
+
 private final class CaptureBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var outData = Data()
@@ -30,6 +72,14 @@ private final class CaptureBuffer: @unchecked Sendable {
 }
 
 struct SevenZipRunner {
+    static func hasActiveProcesses() -> Bool {
+        SevenZipProcessRegistry.shared.hasActiveProcesses()
+    }
+
+    static func terminateAllProcesses() {
+        SevenZipProcessRegistry.shared.terminateAll()
+    }
+
     static func runSilent(
         executablePath: String,
         arguments: [String],
@@ -48,12 +98,14 @@ struct SevenZipRunner {
             process.standardError = FileHandle.nullDevice
 
             process.terminationHandler = { finished in
+                SevenZipProcessRegistry.shared.unregister(finished)
                 DebugLogger.log("runSilent() terminated exit=\(finished.terminationStatus)")
                 continuation.resume(returning: finished.terminationStatus)
             }
 
             do {
                 try process.run()
+                SevenZipProcessRegistry.shared.register(process)
                 DebugLogger.log("runSilent() process.run() succeeded pid=\(process.processIdentifier)")
             } catch {
                 DebugLogger.log("runSilent() process.run() failed error=\(error.localizedDescription)")
@@ -96,12 +148,14 @@ struct SevenZipRunner {
                 let tailOut = outputPipe.fileHandleForReading.readDataToEndOfFile()
                 let tailErr = errorPipe.fileHandleForReading.readDataToEndOfFile()
 
+                SevenZipProcessRegistry.shared.unregister(finished)
                 let combined = capture.combinedOutput(appendTailOut: tailOut, appendTailErr: tailErr)
                 continuation.resume(returning: (finished.terminationStatus, combined))
             }
 
             do {
                 try process.run()
+                SevenZipProcessRegistry.shared.register(process)
             } catch {
                 continuation.resume(returning: (-1, "Failed to start 7zz process: \(error.localizedDescription)\n"))
             }
@@ -111,12 +165,14 @@ struct SevenZipRunner {
     static func run(
         executablePath: String,
         arguments: [String],
+        currentDirectoryURL: URL? = nil,
         onOutput: @escaping @Sendable @MainActor (String) -> Void
     ) async -> Int32 {
         await withCheckedContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executablePath)
             process.arguments = arguments
+            process.currentDirectoryURL = currentDirectoryURL
 
             let outputPipe = Pipe()
             let errorPipe = Pipe()
@@ -142,11 +198,13 @@ struct SevenZipRunner {
             process.terminationHandler = { finished in
                 outputPipe.fileHandleForReading.readabilityHandler = nil
                 errorPipe.fileHandleForReading.readabilityHandler = nil
+                SevenZipProcessRegistry.shared.unregister(finished)
                 continuation.resume(returning: finished.terminationStatus)
             }
 
             do {
                 try process.run()
+                SevenZipProcessRegistry.shared.register(process)
             } catch {
                 outputPipe.fileHandleForReading.readabilityHandler = nil
                 errorPipe.fileHandleForReading.readabilityHandler = nil
