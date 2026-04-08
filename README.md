@@ -7,6 +7,16 @@ It keeps the 7-Zip engine, wraps it in a native SwiftUI shell, and focuses on on
 
 ![ZipMate UI](docs/zipmate-ui.png)
 
+## Latest
+
+`v0.1.2`
+
+- Real progress feedback for pack / extract / drag import
+- Safer quit flow when `7zz` tasks are still running
+- Faster pack path with direct-source packing when possible
+- Better handling for symbolic links during packing
+- More archive association options in first-run setup
+
 ## Why
 
 - 7-Zip workflow, macOS-native UI
@@ -70,6 +80,16 @@ Please review upstream 7-Zip license terms and unRAR restrictions before redistr
 
 ZipMate 是一个面向 macOS 的极简 7-Zip 图形界面。
 核心目标是把 7-Zip 的能力用 Mac 原生方式交付出来：少配置、低心智负担、直接可用。
+
+### 最新更新
+
+`v0.1.2`
+
+- 补上打包 / 解压 / 拖入时的真实进度反馈
+- 有后台 `7zz` 任务时，退出会先确认
+- 打包路径优化：可直接从源目录打包时不再走临时整理
+- 打包时更安全地处理符号链接
+- 首次启动的后缀关联增加更多常用格式
 
 ### 设计方向
 
